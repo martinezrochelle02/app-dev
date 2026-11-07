@@ -1,0 +1,65 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; background: #0f0f0f; color: #f0f0f0; min-height: 100vh; }
+.screen { min-height: 100vh; display: flex; flex-direction: column; }
+
+/* Topbar */
+.topbar { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 12px 24px;
+          display: flex; align-items: center; justify-content: space-between; }
+.topbar .system-name { font-size: 13px; color: #666; }
+.topbar .clock { font-size: 13px; color: #666; }
+.driver-info { display: flex; align-items: center; gap: 10px; }
+.avatar { width: 36px; height: 36px; border-radius: 50%; background: #1a3a5c;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 12px; font-weight: 600; color: #60a5fa; flex-shrink: 0; }
+
+/* Cards */
+.card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 1.25rem; }
+
+/* Status colors */
+.status-awake  { color: #34d399; }
+.status-drowsy { color: #f87171; }
+
+/* Buttons */
+.btn { padding: 12px 28px; border-radius: 8px; font-size: 15px; font-weight: 500;
+       cursor: pointer; border: none; transition: opacity 0.15s; }
+.btn:active { opacity: 0.8; }
+.btn-primary { background: #2563eb; color: white; }
+.btn-danger  { background: #dc2626; color: white; }
+.btn-ghost   { background: transparent; color: #999; border: 1px solid #333; }
+
+/* Table */
+table { width: 100%; border-collapse: collapse; }
+th { background: #1a1a1a; font-size: 11px; font-weight: 500; color: #666;
+     padding: 10px 14px; text-align: left; border-bottom: 1px solid #2a2a2a; }
+td { font-size: 13px; padding: 12px 14px; border-bottom: 1px solid #1e1e1e; }
+tr:hover td { background: #1a1a1a; }
+
+/* Badge */
+.badge { font-size: 11px; font-weight: 500; padding: 3px 10px; border-radius: 20px; }
+.badge-success { background: #052e16; color: #34d399; }
+.badge-good    { background: #1e3a5f; color: #60a5fa; }
+.badge-fair    { background: #3d2600; color: #fbbf24; }
+.badge-poor    { background: #3d0000; color: #f87171; }
+
+/* Live feed box */
+.feed-box { background: #0a0a0a; border-radius: 10px; aspect-ratio: 4/3;
+            position: relative; overflow: hidden; display: flex;
+            align-items: center; justify-content: center; }
+.corner { position: absolute; width: 24px; height: 24px; }
+.corner.tl { top: 14px; left: 14px; border-top: 2.5px solid; border-left: 2.5px solid; border-radius: 3px 0 0 0; }
+.corner.tr { top: 14px; right: 14px; border-top: 2.5px solid; border-right: 2.5px solid; border-radius: 0 3px 0 0; }
+.corner.bl { bottom: 14px; left: 14px; border-bottom: 2.5px solid; border-left: 2.5px solid; border-radius: 0 0 0 3px; }
+.corner.br { bottom: 14px; right: 14px; border-bottom: 2.5px solid; border-right: 2.5px solid; border-radius: 0 0 3px 0; }
+.awake-corners  { border-color: #34d399 !important; }
+.drowsy-corners { border-color: #f87171 !important; }
+
+/* Stat card */
+.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+.stat-card { background: #1a1a1a; border-radius: 8px; padding: 12px; }
+.stat-label { font-size: 11px; color: #666; margin-bottom: 4px; }
+.stat-value { font-size: 22px; font-weight: 500; }
+
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+.blink { animation: blink 1.2s infinite; }
+@keyframes sweep { 0%,100%{top:20%} 50%{top:75%} }
+.scan-line { position: absolute; left: 10%; right: 10%; height: 2px; animation: sweep 2s ease-in-out infinite; }

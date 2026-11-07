@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Attendance History</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .filter-bar { background:#111; border-bottom:1px solid #2a2a2a; padding:10px 24px; display:flex; gap:10px; align-items:center; }
+    .filter-bar input { background:none; border:none; outline:none; font-size:13px; color:#f0f0f0; flex:1; }
+    .table-wrap { overflow-x:auto; }
+  </style>
+</head>
+<body>
+  <div class="screen">
+    <div class="topbar">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:15px; font-weight:500;">Attendance history</span>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <span id="clock" style="font-size:13px; color:#555;"></span>
+        <a href="/" class="btn btn-ghost" style="font-size:13px; padding:6px 14px; text-decoration:none;">Home</a>
+      </div>
+    </div>
+
+    <div class="filter-bar">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#555" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input type="text" id="search" placeholder="Search driver or plate number" oninput="filterTable()">
+      <button class="btn btn-ghost" style="font-size:12px; padding:5px 12px;" onclick="filterAlerts()">With alerts</button>
+      <button class="btn btn-ghost" style="font-size:12px; padding:5px 12px;" onclick="filterAll()">All</button>
+    </div>
+
+    <div class="table-wrap">
+      {% if records %}
+      <table>
+        <thead>
+          <tr>
+            <th>Driver</th>
+            <th>Plate</th>
+            <th>Login</th>
+            <th>Logout</th>
+            <th>Duration</th>
+            <th>Alerts</th>
+            <th>Rating</th>
+            <th>Date</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          {% for r in records %}
+          <tr class="driver-row" data-name="{{ r.Name|lower }}" data-plate="{{ r.Plate|lower }}" data-alerts="{{ r.Alerts }}">
+            <td>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <div class="avatar" style="width:28px;height:28px;font-size:10px;">
+                  {{ r.Name.split()[0][0] }}{{ r.Name.split()[-1][0] if r.Name.split()|length > 1 else '' }}
+                </div>
+                {{ r.Name }}
+              </div>
+            </td>
+            <td style="color:#666;">{{ r.Plate }}</td>
+            <td style="color:#666;">{{ r.Login }}</td>
+            <td style="color:#666;">{{ r.Logout }}</td>
+            <td>{{ r.Duration }}</td>
+            <td style="font-weight:500; color:{{ '#f87171' if r.Alerts|int >= 5 else '#fbbf24' if r.Alerts|int > 0 else '#666' }};">
+              {{ r.Alerts }}
+            </td>
+            <td>
+              <span class="badge {% if r.Rating == 'Excellent' %}badge-success{% elif r.Rating == 'Good' %}badge-good{% elif r.Rating == 'Fair' %}badge-fair{% else %}badge-poor{% endif %}">
+                {{ r.Rating }}
+              </span>
+            </td>
+            <td style="color:#666;">{{ r.Date }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div style="text-align:center; padding:4rem; color:#555;">
+        <p style="font-size:15px;">No attendance records yet.</p>
+        <p style="font-size:13px; margin-top:0.5rem;">Records appear here after drivers complete a session.</p>
+      </div>
+      {% endif %}
+    </div>
+
+    <div style="background:#111; border-top:1px solid #2a2a2a; padding:10px 24px; font-size:12px; color:#555;" id="count-label">
+      Showing {{ records|length }} record{{ 's' if records|length != 1 else '' }}
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+
+    let showAlertsOnly = false;
+
+    function filterTable(){
+      const q = document.getElementById('search').value.toLowerCase();
+      const rows = document.querySelectorAll('.driver-row');
+      let visible = 0;
+      rows.forEach(row => {
+        const matchSearch = row.dataset.name.includes(q) || row.dataset.plate.includes(q);
+        const matchFilter = !showAlertsOnly || parseInt(row.dataset.alerts) > 0;
+        row.style.display = (matchSearch && matchFilter) ? '' : 'none';
+        if(matchSearch && matchFilter) visible++;
+      });
+      document.getElementById('count-label').textContent = `Showing ${visible} record${visible !== 1 ? 's' : ''}`;
+    }
+
+    function filterAlerts(){ showAlertsOnly = true; filterTable(); }
+    function filterAll()   { showAlertsOnly = false; filterTable(); }
+  </script>
+</body>
+</html>

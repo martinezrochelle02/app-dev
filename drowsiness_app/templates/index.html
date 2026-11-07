@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Driver Check-in</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    html, body { height: 100%; overflow: hidden; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+
+    .login-screen {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 0.75rem 1.5rem;
+      box-sizing: border-box;
+    }
+
+    .topbar-mini { position:absolute; top:8px; left:0; right:0; display:flex; justify-content:space-between; padding:0 18px; }
+    .topbar-mini span { font-size:11px; color:#555; }
+
+    .step-bar { display:flex; align-items:center; gap:6px; margin-bottom:0.9rem; }
+    .step { display:flex; align-items:center; gap:5px; }
+    .step-dot { width:20px; height:20px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+                font-size:10px; font-weight:600; border:2px solid #2a2a2a; color:#555; transition: all 0.3s; }
+    .step-label { font-size:10px; color:#555; transition: color 0.3s; }
+    .step-line { width:24px; height:2px; background:#2a2a2a; transition: background 0.3s; }
+    .step.active .step-dot { border-color:#2563eb; background:#2563eb; color:#fff; }
+    .step.active .step-label { color:#ccc; }
+    .step.done .step-dot { border-color:#34d399; background:#34d399; color:#0a0a0a; }
+    .step.done .step-label { color:#34d399; }
+    .step-line.done { background:#34d399; }
+
+    .scan-ring { width: 120px; height: 120px; border-radius: 50%; border: 2px solid #2a2a2a; display: flex; align-items: center; justify-content: center; position: relative; margin: 0 auto 0.9rem; overflow: hidden; background: #0a0a0a; }
+    .scan-ring.active { border-color: #2563eb; }
+    .scan-ring img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+    .status-msg { font-size: 12px; color: #666; margin-top: 0.4rem; min-height: 18px; }
+
+    h1.ci-title { font-size: 19px; font-weight: 500; margin-bottom: 0.3rem; }
+    .ci-sub { color: #666; margin-bottom: 1rem; max-width: 320px; font-size: 12px; }
+
+    .btn { padding: 10px 24px; font-size: 13px; }
+
+    .confirmed-box { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 0.9rem 1.5rem; min-width: 240px; margin: 0.5rem auto; }
+    .conf-avatar { width: 48px; height: 48px; border-radius: 50%; margin: 0 auto 0.6rem; overflow: hidden; display: flex; align-items: center; justify-content: center; background: #2a2a2a; }
+    .conf-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    #conf-name { font-size: 16px !important; }
+    #conf-plate { font-size: 12px !important; margin-bottom: 0.6rem !important; }
+
+    .sync-section { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid #1e1e1e; width: 100%; max-width: 280px; }
+    .sync-btn { background: transparent; border: 1px solid #2a2a2a; color: #888; font-size: 11px; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+    .sync-btn:hover { border-color: #444; color: #aaa; }
+    .sync-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .sync-result { font-size: 10px; color: #666; margin-top: 0.5rem; line-height: 1.4; text-align: left; max-height: 60px; overflow-y: auto; }
+    .sync-result .added   { color: #34d399; }
+    .sync-result .skipped { color: #f87171; }
+
+    .breath-icon-wrap { width:76px; height:76px; border-radius:50%; margin:0 auto 0.9rem; display:flex; align-items:center; justify-content:center;
+                         background:#1a1a1a; border:2px solid #2a2a2a; position:relative; }
+    .breath-icon-wrap.pulse { border-color:#2563eb; animation: breathPulse 1.4s ease-in-out infinite; }
+    .breath-icon-wrap.blow  { border-color:#fbbf24; animation: breathPulse 1s ease-in-out infinite; }
+    @keyframes breathPulse { 0%,100%{ box-shadow: 0 0 0 0 rgba(37,99,235,0.3);} 50%{ box-shadow: 0 0 0 10px rgba(37,99,235,0);} }
+    .breath-step-msg { font-size:14px; color:#ccc; margin-bottom:0.3rem; font-weight:500; }
+    .breath-sub-msg  { font-size:11px; color:#666; margin-bottom:0.9rem; }
+
+    .level-block { width:100%; max-width:280px; margin:0 auto; display:none; }
+    .level-row { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px; }
+    .level-label { font-size:10px; color:#666; }
+    .level-num { font-size:18px; font-weight:500; color:#34d399; transition: color 0.15s; }
+    .level-track { height:8px; background:#1a1a1a; border-radius:5px; overflow:hidden; position:relative; }
+    .level-fill { height:100%; width:0%; background:#34d399; transition: width 0.15s, background 0.15s; }
+    .level-threshold-marker { position:absolute; top:0; bottom:0; left:75%; width:1px; background:#555; }
+    .level-scale { display:flex; justify-content:space-between; margin-top:5px; font-size:9px; color:#555; }
+
+    .lock-icon-wrap { width:76px; height:76px; border-radius:50%; margin:0 auto 0.8rem; display:flex; align-items:center; justify-content:center;
+                       background:#2a0e0e; border:2px solid #f87171; }
+    .fail-box { background:#1a1010; border:1px solid #3d1f1f; border-radius:12px; padding:1rem 1.4rem; min-width:260px; margin:0 auto; }
+    .fail-title { font-size:16px; font-weight:600; color:#f87171; margin-bottom:0.4rem; }
+    .fail-sub   { font-size:11px; color:#999; line-height:1.5; }
+    .fail-note  { margin-top:0.7rem; padding-top:0.7rem; border-top:1px solid #2a1616; font-size:10px; color:#666; }
+
+    @media (max-height: 500px) {
+      .scan-ring { width: 100px; height: 100px; }
+      .breath-icon-wrap, .lock-icon-wrap { width: 64px; height: 64px; }
+      h1.ci-title { font-size: 17px; }
+      .step-bar { margin-bottom: 0.6rem; }
+      .sync-section { margin-top: 0.6rem; padding-top: 0.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="login-screen">
+    <div class="topbar-mini">
+      <span>Bus Driver Drowsiness Detection System</span>
+      <span id="clock"></span>
+    </div>
+
+    <div class="step-bar" id="step-bar">
+      <div class="step active" id="step-1">
+        <div class="step-dot">1</div>
+        <span class="step-label">Face Scan</span>
+      </div>
+      <div class="step-line" id="line-1"></div>
+      <div class="step" id="step-2">
+        <div class="step-dot">2</div>
+        <span class="step-label">Breathalyzer</span>
+      </div>
+      <div class="step-line" id="line-2"></div>
+      <div class="step" id="step-3">
+        <div class="step-dot">3</div>
+        <span class="step-label">Monitoring</span>
+      </div>
+    </div>
+
+    <div id="idle-view">
+      <div class="scan-ring" id="scan-ring">
+        <img id="video-feed" src="/video_feed" alt="Camera feed">
+      </div>
+      <h1 class="ci-title">Driver check-in</h1>
+      <p class="ci-sub">Tap below to scan your face and log your attendance.</p>
+      <button class="btn btn-primary" id="scan-btn" onclick="startScan()">Tap to scan</button>
+      <p class="status-msg" id="status-msg"></p>
+
+      <div class="sync-section">
+        <button class="sync-btn" id="sync-btn" onclick="syncDrivers()">Sync New Drivers</button>
+        <div class="sync-result" id="sync-result"></div>
+      </div>
+    </div>
+
+    <div id="confirmed-view" style="display:none;">
+      <div class="confirmed-box">
+        <div class="conf-avatar">
+          <img id="conf-photo" src="" alt="" style="display:none;">
+          <span id="conf-initials" style="font-size:13px; font-weight:500;">JD</span>
+        </div>
+        <h2 id="conf-name" style="font-weight:500; margin-bottom:2px;"></h2>
+        <p id="conf-plate" style="color:#666;"></p>
+        <div style="display:flex; align-items:center; justify-content:center; gap:5px; color:#34d399; font-size:11px; margin-bottom:0.5rem;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+          Face match confirmed
+        </div>
+        <p style="font-size:10px; color:#555;" id="conf-time"></p>
+      </div>
+      <p class="status-msg" id="confirmed-next-msg">Proceeding to breathalyzer test...</p>
+    </div>
+
+    <div id="breath-view" style="display:none;">
+      <div class="breath-icon-wrap" id="breath-icon-wrap">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="1.6" id="breath-icon">
+          <path d="M8 2h8M12 2v4M6 8a6 6 0 0 1 12 0v6a6 6 0 0 1-12 0V8Z"/>
+          <path d="M9 12h6M9 15h6"/>
+        </svg>
+      </div>
+      <div class="breath-step-msg" id="breath-step-msg">Connecting to device...</div>
+      <div class="breath-sub-msg" id="breath-sub-msg">Please wait a moment.</div>
+
+      <div class="level-block" id="level-block">
+        <div class="level-row">
+          <span class="level-label">Alcohol level</span>
+          <span class="level-num" id="level-num">0</span>
+        </div>
+        <div class="level-track">
+          <div class="level-fill" id="level-fill"></div>
+          <div class="level-threshold-marker"></div>
+        </div>
+        <div class="level-scale">
+          <span>0</span>
+          <span>Threshold</span>
+          <span>2000</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="fail-view" style="display:none;">
+      <div class="lock-icon-wrap">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="1.8">
+          <rect x="4" y="10" width="16" height="10" rx="2"/>
+          <path d="M8 10V7a4 4 0 0 1 8 0v3"/>
+          <line x1="12" y1="14" x2="12" y2="17"/>
+        </svg>
+      </div>
+      <div class="fail-box">
+        <div class="fail-title">Engine Interlocked</div>
+        <div class="fail-sub" id="fail-msg">Alcohol detected. You are not permitted to drive at this time.</div>
+        <div class="fail-note" id="fail-peak-note"></div>
+      </div>
+      <button class="btn btn-ghost" style="margin-top:1rem; padding:8px 20px; font-size:12px;" onclick="restartFlow()">Back to start</button>
+    </div>
+  </div>
+
+  <script>
+    function updateClock() {
+      document.getElementById('clock').textContent = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    function setStep(n){
+      for (let i = 1; i <= 3; i++) {
+        const stepEl = document.getElementById('step-' + i);
+        stepEl.classList.remove('active','done');
+        if (i < n) stepEl.classList.add('done');
+        else if (i === n) stepEl.classList.add('active');
+      }
+      for (let i = 1; i <= 2; i++) {
+        const lineEl = document.getElementById('line-' + i);
+        lineEl.classList.toggle('done', i < n);
+      }
+    }
+
+    function showView(id){
+      ['idle-view','confirmed-view','breath-view','fail-view'].forEach(v=>{
+        document.getElementById(v).style.display = (v === id) ? 'block' : 'none';
+      });
+    }
+
+    const GAUGE_MAX = 2000;
+    const BLOW_THRESHOLD = 800;
+    const ALCOHOL_THRESHOLD = 1500;
+
+    function updateLevel(val){
+      val = Math.max(0, Math.min(val, GAUGE_MAX));
+      const pct = (val / GAUGE_MAX) * 100;
+      const fill = document.getElementById('level-fill');
+      const num  = document.getElementById('level-num');
+
+      num.textContent = val;
+      fill.style.width = pct + '%';
+
+      const color = val >= ALCOHOL_THRESHOLD ? '#f87171' :
+                    val >= BLOW_THRESHOLD    ? '#fbbf24' : '#34d399';
+      fill.style.background = color;
+      num.style.color = color;
+    }
+
+    async function startScan() {
+      const ring = document.getElementById('scan-ring');
+      const msg  = document.getElementById('status-msg');
+      const btn  = document.getElementById('scan-btn');
+
+      ring.classList.add('active');
+      btn.disabled = true;
+      msg.textContent = 'Scanning... hold still.';
+
+      try {
+        const res  = await fetch('/api/scan_face', { method: 'POST' });
+        const data = await res.json();
+
+        if (data.status === 'matched') {
+          showView('confirmed-view');
+
+          const initials = data.name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
+          document.getElementById('conf-initials').textContent = initials;
+          document.getElementById('conf-name').textContent    = data.name;
+          document.getElementById('conf-plate').textContent   = 'Plate: ' + data.plate;
+          document.getElementById('conf-time').textContent    = 'Checked in: ' + new Date().toLocaleString();
+
+          const photoImg = document.getElementById('conf-photo');
+          const initialsSpan = document.getElementById('conf-initials');
+          photoImg.onload  = () => { photoImg.style.display = 'block'; initialsSpan.style.display = 'none'; };
+          photoImg.onerror = () => { photoImg.style.display = 'none'; initialsSpan.style.display = 'block'; };
+          photoImg.src = '/driver_photo/' + encodeURIComponent(data.name) + '.jpg';
+
+          setTimeout(beginBreathTest, 1500);
+        } else {
+          msg.textContent = 'No match found. Please try again.';
+          ring.classList.remove('active');
+          btn.disabled = false;
+        }
+      } catch(e) {
+        msg.textContent = 'Camera error. Try again.';
+        ring.classList.remove('active');
+        btn.disabled = false;
+      }
+    }
+
+    let lastPeakSeen = 0;
+
+    async function beginBreathTest(){
+      setStep(2);
+      showView('breath-view');
+      document.getElementById('level-block').style.display = 'none';
+      lastPeakSeen = 0;
+      setBreathUI('connecting');
+
+      const started = await fetch('/api/start_breath_test', { method: 'POST' })
+        .then(r => r.json()).catch(() => null);
+
+      if (!started) {
+        setBreathUI('failed', 'bt_disconnected');
+        return;
+      }
+      pollBreathStatus();
+    }
+
+    function setBreathUI(state, reason){
+      const wrap = document.getElementById('breath-icon-wrap');
+      const step = document.getElementById('breath-step-msg');
+      const sub  = document.getElementById('breath-sub-msg');
+      wrap.classList.remove('pulse','blow');
+
+      if (state === 'connecting') {
+        wrap.classList.add('pulse');
+        step.textContent = 'Connecting to breathalyzer...';
+        sub.textContent  = 'Please wait a moment.';
+      } else if (state === 'waiting') {
+        wrap.classList.add('pulse');
+        step.textContent = 'Sensor warming up...';
+        sub.textContent  = 'Get ready to blow into the device.';
+      } else if (state === 'ready_to_blow') {
+        wrap.classList.add('blow');
+        step.textContent = 'Blow into the breathalyzer now';
+        sub.textContent  = 'Keep blowing until the reading settles.';
+        document.getElementById('level-block').style.display = 'block';
+      } else if (state === 'passed') {
+        step.textContent = 'Test passed';
+        sub.textContent  = 'Peak level: ' + lastPeakSeen + ' · Proceeding to monitoring...';
+      } else if (state === 'failed') {
+        showBreathFail(reason);
+      }
+    }
+
+    async function pollBreathStatus(){
+      try {
+        const res  = await fetch('/api/breath_status');
+        const data = await res.json();
+
+        if (typeof data.level === 'number') {
+          lastPeakSeen = Math.max(lastPeakSeen, data.level);
+          updateLevel(data.level);
+        }
+
+        if (data.state === 'waiting' || data.state === 'ready_to_blow') {
+          setBreathUI(data.state);
+          setTimeout(pollBreathStatus, 500);
+        } else if (data.state === 'passed') {
+          setStep(3);
+          setBreathUI('passed');
+          setTimeout(() => window.location = '/monitor', 1000);
+        } else if (data.state === 'failed') {
+          setBreathUI('failed', data.reason);
+        } else {
+          setTimeout(pollBreathStatus, 500);
+        }
+      } catch(e) {
+        setTimeout(pollBreathStatus, 1500);
+      }
+    }
+
+    function showBreathFail(reason){
+      showView('fail-view');
+      const msg = reason === 'timeout' ? 'No response from the breathalyzer device. Test timed out.' :
+                  reason === 'bt_disconnected' ? 'Could not reach the interlock device. Contact an administrator.' :
+                  'Alcohol detected. You are not permitted to drive at this time.';
+      document.getElementById('fail-msg').textContent = msg;
+
+      const peakNote = document.getElementById('fail-peak-note');
+      peakNote.textContent = (reason !== 'timeout' && reason !== 'bt_disconnected' && lastPeakSeen > 0)
+        ? 'Peak reading: ' + lastPeakSeen + '. Please see a system administrator to reset the interlock.'
+        : 'Please see a system administrator to reset the interlock.';
+    }
+
+    function restartFlow(){
+      setStep(1);
+      showView('idle-view');
+      document.getElementById('scan-ring').classList.remove('active');
+      document.getElementById('scan-btn').disabled = false;
+      document.getElementById('status-msg').textContent = '';
+    }
+
+    async function syncDrivers() {
+      const btn    = document.getElementById('sync-btn');
+      const result = document.getElementById('sync-result');
+
+      btn.disabled = true;
+      btn.textContent = 'Syncing...';
+      result.innerHTML = '';
+
+      try {
+        const res  = await fetch('/api/sync_drivers', { method: 'POST' });
+        const data = await res.json();
+
+        let html = '';
+        if (data.added.length > 0) {
+          html += data.added.map(d =>
+            `<div class="added">✓ Added ${d.name} (${d.plate})</div>`
+          ).join('');
+        }
+        if (data.skipped.length > 0) {
+          html += data.skipped.map(s =>
+            `<div class="skipped">✗ ${s.file} — ${s.reason}</div>`
+          ).join('');
+        }
+        if (data.added.length === 0 && data.skipped.length === 0) {
+          html = '<div>No new photos found in new_drivers folder.</div>';
+        }
+        result.innerHTML = html;
+      } catch(e) {
+        result.innerHTML = '<div class="skipped">Sync failed. Check the server terminal.</div>';
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Sync New Drivers';
+    }
+  </script>
+</body>
+</html>
