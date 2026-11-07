@@ -21,11 +21,11 @@ import threading
 import serial
 import json
 import time
-import wave                                   # <-- NEW
+import wave
 from datetime import datetime
 from PIL import Image as PILImage, ImageOps
 from picamera2 import Picamera2
-from gpiozero import OutputDevice             # <-- NEW
+from gpiozero import OutputDevice
 
 app = Flask(__name__)
 
@@ -49,9 +49,14 @@ RECORDINGS_DIR     = os.path.join(BASE_DIR, "recordings")        # recordings/<d
 RECORDINGS_LOG_CSV = os.path.join(BASE_DIR, "recordings_log.csv")
 RECORD_FPS         = 10        # Frames per second for the video
 RECORD_MAX_SEC     = 120       # Maximum length of a single video
-RECORD_AFTER_SEC   = 3         # Continue recording for this long after the driver wakes up
+RECORD_AFTER_SEC   = 1.0       # ★ BAGO: tuloy lang ng 1s pagkatapos dumilat / matapos ang hikab
+RECORD_COOLDOWN_SEC = 4.0      # ★ BAGO: pahinga bago ulit mag-record (para hindi putol-putol ang clips)
 RECORD_MIN_FREE_MB = 500       # Stop recording if free disk space falls below this
 RECORD_KEEP_MAX    = 300       # Maximum number of videos to keep (deletes the oldest ones)
+
+# ★ BAGO: Kailan lang magre-record (EYES OPEN = HINDI magre-record)
+REC_EYES_SEC       = 1.5       # Nakapikit nang tuloy-tuloy ng ganito katagal
+REC_YAWN_SEC       = 2.0       # Humihikab nang tuloy-tuloy ng ganito katagal
 
 DRIVER_PHOTOS    = os.path.join(BASE_DIR, "..", "registered_drivers")
 NEW_DRIVERS_DIR  = os.path.join(BASE_DIR, "new_drivers")
@@ -105,6 +110,17 @@ SMS_LOCATION_COOLDOWN_SEC = 15
 SCAN_TIMEOUT_SEC     = 20      # How long to scan for a face per tap
 FACE_MATCH_THRESHOLD = 0.60    # Lower = stricter match
 
+# ── Driver Lock (ang naka-attendance lang ang imo-monitor) ──
+DRIVER_LOCK_ENABLED    = True
+DRIVER_LOCK_STRICT     = False  # True = kapag nawala ang mukha ng driver nang matagal, walang imo-monitor
+DRIVER_TRACK_SEC       = 1.5    # gaano kadalas hanapin ulit ang mukha ng driver
+DRIVER_TRACK_SCALE     = 0.5    # liit ng frame para mas mabilis ang face search
+DRIVER_MATCH_THRESHOLD = 0.55   # mas mababa = mas mahigpit
+DRIVER_BOX_PAD         = 0.7    # lawak ng paligid ng mukha na kasama (para sa mata, bibig, ulo)
+DRIVER_BOX_KEEP_SEC    = 15.0   # gaano katagal gagamitin ang huling posisyon kapag di makita ang mukha (hal. nakayuko)
+driver_track = {"enc": None, "box": None, "seen": 0.0}
+driver_track_lock = threading.Lock()
+
 # ── Grace Period & Time Format ─────────────────────────
 GRACE_SECONDS = 60     # Must match RETEST_GRACE_MS (60000) on the ESP32
 GRACE_BUFFER  = 2      # Buffer before logging attendance (ensures ESP32 grace is finished)
@@ -112,26 +128,63 @@ TIME_FMT = "%I:%M:%S %p"
 DATE_FMT = "%Y-%m-%d"
 
 # ── DROWSINESS (Adjust settings here) ──────────────────
-DETECT_CONF        = 0.25   # Lower = more sensitive (even from far away). More false hits, so there is time + ratio confirmation below
-WARN_SECONDS       = 5.0    # Continuous eye closure / head down / drowsy signs for 5s = WARNING
-DROWSY_SECONDS     = 10.0   # Continuous 10s (confirmed) = DROWSY ALERT (buzzer + voice + SMS)
+# Eyes OPEN = AWAKE. Drowsy ALERT happens when:
+#   (a) eyes closed continuously for DROWSY_SECONDS (4s), OR
+#   (b) head drooping with eyes not visible/closed for DROWSY_SECONDS (4s), OR
+#   (c) 2 or more signs (eyes closed / yawning / head drooping / head tilt) happen together for COMBO_DROWSY_SEC
+# A single yawn / head tilt / head droop (held 2s) only gives a WARNING.
+# If the driver yawns AND closes eyes at the same time, the warning shows "Eyes closed + Yawning".
+DETECT_CONF        = 0.20
+WARN_SECONDS       = 1.5    # Eyes closed this long = WARNING
+DROWSY_SECONDS     = 4.0    # Eyes closed (or head down + eyes hidden) this long = DROWSY ALERT
 WARN_EYES_SEC      = WARN_SECONDS
-WARN_HEAD_SEC      = WARN_SECONDS
-WARN_YAWN_SEC      = WARN_SECONDS   # Yawning warning is also 5s (not immediate). The yawn count (stats) uses YAWN_COUNT_SEC
-SLEEP_GAP_SEC      = 1.2    # Buffer for blinking / brief tracking loss
-AWAKE_CLEAR_SEC    = 0.5    # How quickly the count resets when eyes are open
-RECOVER_SEC        = 3.0    # If there is no clear "eyes open" detection, how many seconds of not-sleeping before the alert stops
-NO_DRIVER_SEC      = 3.0    # No person detected for this long = "No driver"
-FACELOST_MAX_SEC   = 20.0   # Terminate alert if face is lost during an alert for this long
-YAWN_COUNT_SEC     = 1.5    # A yawn of >=1.5s is only counted in stats (no sound)
-RECOVER_EYES_SEC   = 0.6    # Eyes open within 0.6s = awake immediately, sound/vibration stops
-WARN_CONFIRM_RATIO = 0.60   # Within 5s, >=60% of frames must show the sign before a WARNING
-DROWSY_CONFIRM_RATIO = 0.70 # Within 10s, >=70% of frames must show sleeping/closed eyes before a DROWSY ALERT
-HIST_MIN_FRAMES    = 6      # Minimum frames in the window before trusting it (avoids false alarms when detection is sparse)
-ZOOM_ENABLED       = True   # When no eyes are visible (far away), repeat detection on a zoomed crop
-ZOOM_CENTER_FRAC   = 0.65   # If nothing was detected, zoom into the center (65% of the frame)
-ZOOM_PAD           = 0.5    # Extra margin around the detected face before zooming
-WARN_BEEP_REPEAT   = 1.5    # During WARNING: buzzer beeps every X seconds (buzzer only, no high-level alarm)
+WARN_YAWN_SEC      = 2.0    # Yawn must last this long to be a WARNING (talking won't trigger)
+COMBO_DROWSY_SEC   = 2.5    # 2+ warning signs at the same time for this long = DROWSY ALERT
+SLEEP_GAP_SEC      = 0.8
+AWAKE_CLEAR_SEC    = 0.4
+RECOVER_SEC        = 2.0
+NO_DRIVER_SEC      = 3.0
+FACELOST_MAX_SEC   = 20.0
+YAWN_COUNT_SEC     = 0.8    # A yawn of >=0.8s is counted in stats
+RECOVER_EYES_SEC   = 0.5
+WARN_CONFIRM_RATIO = 0.60
+DROWSY_CONFIRM_RATIO = 0.65
+HIST_MIN_FRAMES    = 2
+ZOOM_ENABLED       = True
+ZOOM_CENTER_FRAC   = 0.65
+ZOOM_PAD           = 0.5
+WARN_BEEP_REPEAT   = 1.5
+
+# PERCLOS: % ng oras na nakapikit ang mata sa loob ng isang window
+PERCLOS_WINDOW_SEC = 30.0
+PERCLOS_THRESHOLD  = 0.30    # 30% ng nakitang frames ay nakapikit = DROWSY ALERT
+PERCLOS_MIN_SEC    = 20.0    # kailangan ng ganito kahabang history bago humusga
+PERCLOS_MIN_FRAMES = 8       # minimum na frames kung saan kita ang mata
+
+# Eye / mouth confidence thresholds
+EYE_CLOSED_CONF    = 0.40
+EYE_OPEN_CONF      = 0.35
+EYE_MARGIN         = 0.10
+YAWN_CONF          = 0.40   # was 0.25 (too sensitive)
+YAWN_MARGIN        = 0.10   # was 0.20
+YAWN_GAP_SEC       = 0.8
+YAWN_EYE_FORGIVE_SEC = 3.0
+YAWN_MIN_ASPECT    = 0.50   # mouth box height/width; talking is wide and flat. Set to 0 if real yawns get missed
+
+# Head drooping (head down)
+HEAD_DOWN_CONF     = 0.40
+HEAD_DOWN_WARN_SEC = 2.0    # Head down this long = WARNING
+HEAD_DOWN_GAP_SEC  = 0.8
+
+# Head tilt (left/right)
+TILT_WARN_SEC      = 2.0    # Tilt must be held this long = WARNING
+TILT_CONF          = 0.40   # was 0.25
+TILT_CONF_NO_ROLL  = 0.55   # If the eye-line angle isn't available, the class alone needs this confidence
+TILT_MARGIN        = 0.05   # was 0.25 (head_normal must not be clearly higher than tilt)
+TILT_MIN_DEG       = 8.0    # Eye-line roll must be at least this when the class says tilt
+TILT_STRONG_DEG    = 15.0   # Eye-line roll alone this big = tilt
+TILT_GAP_SEC       = 0.6
+TILT_POSITIVE_IS_RIGHT = os.environ.get("TILT_POS_IS_RIGHT", "1") == "1"
 
 # ── Session State ──────────────────────────────────────
 session = {
@@ -142,7 +195,7 @@ session = {
     "login_lat": "",           # GPS latitude at login
     "login_lon": "",           # GPS longitude at login
     "alerts": [],              # DROWSY ALERTS (timestamps)
-    "warn_events": [],         # WARNINGS (eyes closed, yawn, head down)
+    "warn_events": [],         # WARNINGS (eyes closed, yawn, head tilt)
     "yawns": 0,
     "videos": 0,               # Number of videos recorded in this session
     "alcohol_result": None,    # "CLEAR" / "DETECTED" / None
@@ -161,7 +214,13 @@ last_engine_off_sms = 0.0
 last_location_sms = 0.0
 
 # ── Load YOLO model ────────────────────────────────────
-model = YOLO('best.pt')
+_NCNN_DIR = os.path.join(BASE_DIR, "best_ncnn_model")
+_PT_PATH  = MODEL_PATH if os.path.isfile(MODEL_PATH) else os.path.join(BASE_DIR, "best.pt")
+if os.path.isdir(_NCNN_DIR):
+    model = YOLO(_NCNN_DIR, task="detect")      # mas mabilis sa Raspberry Pi
+else:
+    model = YOLO(_PT_PATH)
+print(f"[model] loaded: {_NCNN_DIR if os.path.isdir(_NCNN_DIR) else _PT_PATH}")
 
 # ── Global Camera: SINGLE capture thread ────────────────
 class CameraHub:
@@ -195,7 +254,9 @@ class CameraHub:
                 self.cam = None
                 time.sleep(1.0)
             cam = Picamera2()
-            cam.configure(cam.create_preview_configuration(main={"size": (640, 480)}))
+            cam.configure(cam.create_preview_configuration(
+                main={"size": (640, 480)},
+                controls={"FrameRate": 15}))
             cam.start()
             self.cam = cam
             self.fails = 0
@@ -476,7 +537,7 @@ def enforce_lock():
     if get_persisted_lock() and str(esp32_data.get("state", "")).upper() != "LOCKOUT":
         send_to_esp32("LOCK")
 
-# ── Drowsy Alert Incident Recorder ──────────────────────
+# ── Incident Recorder (pikit / hikab lang) ──────────────
 def prune_recordings():
     try:
         files = []
@@ -497,12 +558,19 @@ class IncidentRecorder:
         self.lock = threading.Lock()
         self.active = False
         self.stop_at = None
+        self.reasons = []
+        self.last_end = 0.0
 
-    def start(self, driver, plate, detail=""):
+    def start(self, driver, plate, reason=""):
+        """Tawagin kada frame habang may pikit/hikab. Kung nagre-record na, itutuloy lang."""
         with self.lock:
             if self.active:
-                self.stop_at = None
+                self.stop_at = None                      # may pikit/hikab pa, huwag itigil
+                if reason and reason not in self.reasons:
+                    self.reasons.append(reason)
                 return True
+            if time.time() - self.last_end < RECORD_COOLDOWN_SEC:
+                return False
             try:
                 free_mb = shutil.disk_usage(BASE_DIR).free / 1048576
             except Exception:
@@ -512,16 +580,18 @@ class IncidentRecorder:
                 return False
             self.active = True
             self.stop_at = None
+            self.reasons = [reason] if reason else []
         lat, lon = gps_pos()
-        threading.Thread(target=self._run, args=(driver, plate, detail, lat, lon), daemon=True).start()
+        threading.Thread(target=self._run, args=(driver, plate, lat, lon), daemon=True).start()
         return True
 
     def stop(self):
+        """Dumilat na / tapos na ang hikab: itigil pagkalipas ng RECORD_AFTER_SEC."""
         with self.lock:
             if self.active and self.stop_at is None:
                 self.stop_at = time.time() + RECORD_AFTER_SEC
 
-    def _run(self, driver, plate, detail, lat, lon):
+    def _run(self, driver, plate, lat, lon):
         t0 = datetime.now()
         day = t0.strftime(DATE_FMT)
         day_dir = os.path.join(RECORDINGS_DIR, day)
@@ -534,6 +604,7 @@ class IncidentRecorder:
         label_plate = (plate or "N/A").encode("ascii", "ignore").decode()
         writer, frames = None, 0
         start = time.time()
+        detail = "Drowsy"
         try:
             interval = 1.0 / RECORD_FPS
             next_t, last_seq = 0.0, -1
@@ -555,8 +626,9 @@ class IncidentRecorder:
                 next_t = now + interval
                 img = frame.copy()
                 stamp = datetime.now().strftime("%Y-%m-%d  %I:%M:%S %p")
+                what = (" + ".join(self.reasons) or "DROWSY").upper()
                 cv2.rectangle(img, (0, 0), (img.shape[1], 26), (0, 0, 0), -1)
-                cv2.putText(img, f"{stamp} | {label_who} | {label_plate} | DROWSY ALERT",
+                cv2.putText(img, f"{stamp} | {label_who} | {label_plate} | {what}",
                             (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                 if writer is None:
                     h, w = img.shape[:2]
@@ -573,6 +645,8 @@ class IncidentRecorder:
             with self.lock:
                 self.active = False
                 self.stop_at = None
+                self.last_end = time.time()
+                detail = " + ".join(self.reasons) or "Drowsy"
 
         dur = max(time.time() - start, 0.1)
         if frames < 5 or not os.path.isfile(raw_path):
@@ -608,7 +682,7 @@ class IncidentRecorder:
                     rel, f"{int(dur)}s", lat, lon, detail])
         with session_lock:
             session["videos"] += 1
-        print(f"[rec] saved {rel} ({int(dur)}s)")
+        print(f"[rec] saved {rel} ({int(dur)}s) - {detail}")
         prune_recordings()
 
 recorder = IncidentRecorder()
@@ -1509,7 +1583,7 @@ def check_grace_expiry():
     except Exception as e:
         print(f"Grace check error: {e}")
 
-# ── Vibration Motor (V919) + Speaker Alerts ────────────   # <-- NEW (whole section, more robust sound)
+# ── Vibration Motor (V919) + Speaker Alerts ────────────
 VIB_PIN          = 17      # BCM GPIO17 (physical pin 11)
 VIB_ACTIVE_HIGH  = os.environ.get("VIB_ACTIVE_HIGH", "1") == "1"   # If inverted (vibrates when OFF): VIB_ACTIVE_HIGH=0 python3 app.py
 VIB_WARN_ON_SEC  = 0.5     # WARNING: vibrate ON duration
@@ -1801,37 +1875,97 @@ class StateTimer:
     def live(self, now, within=0.7):
         return self.since is not None and (now - self.last) <= within
 
-def held(timer, now):
-    return timer.span() if timer.live(now) else 0.0
+def held(timer, now, within=0.7):
+    return timer.span() if timer.live(now, within) else 0.0
 
-def analyze(detected):
-    """Lower thresholds so detection works even from far away; accuracy is ensured by time + ratio confirmation."""
-    best = {}
-    for name, conf in detected:
+EYE_CLASSES = {'eye_closed_L', 'eye_closed_R', 'eye_close_L', 'eye_open_L', 'eye_open_R'}
+
+def _eye_roll_deg(dets):
+    """Roll angle of the line between the two eyes (needs boxes). None if both eyes aren't visible."""
+    pick = {}
+    for d in dets:
+        n, c = d[0], d[1]
+        if n in EYE_CLASSES and c >= 0.30 and len(d) > 2 and d[2]:
+            side = n[-1]                       # 'L' or 'R'
+            if c > pick.get(side, (0.0, None))[0]:
+                pick[side] = (c, d[2])
+    if "L" not in pick or "R" not in pick:
+        return None
+    pts = []
+    for s in ("L", "R"):
+        x1, y1, x2, y2 = pick[s][1]
+        pts.append(((x1 + x2) / 2, (y1 + y2) / 2))
+    pts.sort()                                  # left-most point in the image first
+    dx, dy = pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]
+    if dx < 5:
+        return None
+    return math.degrees(math.atan2(dy, dx))     # + = right side of image lower
+
+def analyze(dets):
+    """dets = [(name, conf, (x1,y1,x2,y2)), ...]  (box optional)
+    Eyes OPEN = AWAKE, no matter the head pose. Closed eyes (or head drooping with eyes not open) = 'sleeping'.
+    Yawning, head drooping and head tilt need to be held for a short time before they raise a WARNING."""
+    best, box = {}, {}
+    for d in dets:
+        name, conf = d[0], d[1]
         if name in KNOWN_CLASSES and conf > best.get(name, 0.0):
             best[name] = conf
+            box[name] = d[2] if len(d) > 2 else None
     g = lambda *names: max((best.get(n, 0.0) for n in names), default=0.0)
+
     closed_c = g('eye_closed_L', 'eye_closed_R', 'eye_close_L')
     open_c   = g('eye_open_L', 'eye_open_R')
-    eyes_closed = closed_c >= 0.30 and closed_c > open_c
-    eyes_open   = open_c >= 0.30 and open_c >= closed_c
+    eyes_open   = open_c >= EYE_OPEN_CONF and open_c >= closed_c - EYE_MARGIN
+    eyes_closed = (not eyes_open) and closed_c >= EYE_CLOSED_CONF and closed_c > open_c + EYE_MARGIN
+
+    # Yawn: mouth_open seen. Aspect check only if YAWN_MIN_ASPECT > 0
     mouth_c = g('mouth_open')
-    yawning = mouth_c >= 0.35 and mouth_c > g('mouth_closed')
+    aspect = None
+    aspect_ok = True
+    mb = box.get('mouth_open')
+    if mb:
+        w, h = mb[2] - mb[0], mb[3] - mb[1]
+        aspect = h / max(w, 1.0)
+        aspect_ok = aspect >= YAWN_MIN_ASPECT
+    yawning = mouth_c >= YAWN_CONF and mouth_c >= g('mouth_closed') - YAWN_MARGIN and aspect_ok
+
+    # Head tilt: class + eye-line roll must agree (or a very strong roll alone)
+    roll = _eye_roll_deg(dets)
+    tl_c, tr_c, norm_c = g('head_tilt_L'), g('head_tilt_R'), g('head_normal')
+    cls_c = max(tl_c, tr_c)
+    tilt_l = tilt_r = False
+    if cls_c >= TILT_CONF and cls_c >= norm_c - TILT_MARGIN:
+        if roll is None:
+            if cls_c >= TILT_CONF_NO_ROLL:
+                tilt_l, tilt_r = (tl_c >= tr_c), (tr_c > tl_c)
+        elif abs(roll) >= TILT_MIN_DEG:
+            tilt_l, tilt_r = (tl_c >= tr_c), (tr_c > tl_c)
+    if not (tilt_l or tilt_r) and roll is not None and abs(roll) >= TILT_STRONG_DEG:
+        if (roll > 0) == TILT_POSITIVE_IS_RIGHT:
+            tilt_r = True
+        else:
+            tilt_l = True
+
     down_c = g('head_down')
-    head_down = down_c >= 0.40 and down_c > g('head_normal')
-    tilt_c = g('head_tilt_L', 'head_tilt_R')
-    head_tilt = tilt_c >= 0.40 and tilt_c > g('head_normal')
-    d_c = g('drowsy')
-    drowsy_face = d_c >= 0.50 and d_c > g('awake') and not yawning
-    sleeping = (eyes_closed or head_down or drowsy_face) and not eyes_open
+    head_down = down_c >= HEAD_DOWN_CONF and down_c > norm_c
+
     return {
         "has_driver":  bool(best) and max(best.values()) >= DETECT_CONF,
         "eyes_closed": eyes_closed, "eyes_open": eyes_open,
-        "yawning": yawning, "head_down": head_down, "head_tilt": head_tilt,
-        "sleeping": sleeping,
+        "yawning": yawning, "head_down": head_down,
+        "tilt_l": tilt_l, "tilt_r": tilt_r, "head_tilt": tilt_l or tilt_r,
+        "roll": None if roll is None else round(roll, 1),
+        # closed eyes = sleeping; head drooping with eyes NOT clearly open also counts
+        "sleeping": eyes_closed or (head_down and not eyes_open),
+        "dbg": {"tilt_cls": round(cls_c, 2), "tilt_L": round(tl_c, 2), "tilt_R": round(tr_c, 2),
+                "normal": round(norm_c, 2), "down": round(down_c, 2),
+                "roll": None if roll is None else round(roll, 1),
+                "mouth_open": round(mouth_c, 2), "mouth_closed": round(g('mouth_closed'), 2),
+                "mouth_aspect": None if aspect is None else round(aspect, 2)},
     }
 
-HIST_IDX = {"sleeping": 1, "closed": 2, "down": 3, "tilt": 4, "yawn": 5, "open": 6}
+# (time, sleeping, closed, down, tiltL, yawn, open, tiltR)
+HIST_IDX = {"sleeping": 1, "closed": 2, "down": 3, "tiltL": 4, "yawn": 5, "open": 6, "tiltR": 7}
 
 class DriverMonitor:
     def __init__(self):
@@ -1842,17 +1976,22 @@ class DriverMonitor:
 
     def _blank(self, status, condition=""):
         return {"status": status, "condition": condition, "signs": [],
-                "drowsy_for": 0.0, "detected": [], "updated": time.time()}
+                "drowsy_for": 0.0, "detected": [], "tilt_deg": None, "debug": None,
+                "updated": time.time()}
 
     def _reset(self):
         self.sleep  = StateTimer(SLEEP_GAP_SEC)
         self.closed = StateTimer(SLEEP_GAP_SEC)
+        self.raw_closed = StateTimer(SLEEP_GAP_SEC)   # raw eyes-closed (NOT hidden by yawn forgiveness)
         self.down   = StateTimer(SLEEP_GAP_SEC)
-        self.tilt   = StateTimer(SLEEP_GAP_SEC)
-        self.yawn   = StateTimer(1.2)     # warning timer (bridges brief mouth-closing during a yawn)
+        self.tiltL  = StateTimer(TILT_GAP_SEC)
+        self.tiltR  = StateTimer(TILT_GAP_SEC)
+        self.yawn   = StateTimer(0.6)     # warning timer (bridges brief mouth-closing during a yawn)
         self.ystat  = StateTimer(0.6)     # stats timer (yawn count)
         self.opened = StateTimer(0.4)     # eyes open
+        self.combo  = StateTimer(SLEEP_GAP_SEC)   # 2+ warning signs at once
         self.hist = deque()
+        self.perclos = deque()            # PERCLOS: (time, eyes_closed, eyes_open)
         self.yawn_counted = False
         self.drowsy = False
         self.awake_since = None
@@ -1860,11 +1999,15 @@ class DriverMonitor:
         self.last_seen = 0.0
         self.warn_active = set()
         self.last_warn_beep = 0.0
+        self.dt = 0.4            # average seconds between detection frames
+        self.last_update = 0.0
 
     def _clear_signs(self):
-        for t in (self.sleep, self.closed, self.down, self.tilt, self.yawn):
+        for t in (self.sleep, self.closed, self.raw_closed, self.down,
+                  self.tiltL, self.tiltR, self.yawn, self.combo):
             t.reset()
         self.hist.clear()
+        self.perclos.clear()              # PERCLOS
 
     def _ratio(self, key, window, now):
         i = HIST_IDX[key]
@@ -1904,7 +2047,7 @@ class DriverMonitor:
             session["alerts"].append(datetime.now().strftime(TIME_FMT))
             alert_count = len(session["alerts"])
         log_drowsy("Drowsy Alert", detail or "Continuous drowsiness")
-        recorder.start(session["driver_name"], session["plate_number"], detail or "Continuous drowsiness")
+        # ★ BAGO: tinanggal ang recorder.start() dito. Hiwalay na ang recording (tingnan sa update)
         send_to_esp32("DROWSY_ON")
         if (now - last_drowsy_sms) >= SMS_DROWSY_COOLDOWN_SEC:
             gsm.send_sms(build_drowsy_sms(session["driver_name"], session["plate_number"], alert_count), priority=0)
@@ -1915,47 +2058,94 @@ class DriverMonitor:
         self.awake_since = None
         self._clear_signs()
         send_to_esp32("DROWSY_OFF")
-        recorder.stop()
+        # ★ BAGO: tinanggal ang recorder.stop() dito. Hiwalay na ang recording
 
     def update(self, sig, now, names):
         with self.lock:
             self.active = True
+
+            # Adapt all timers to the real detection speed (slow FPS on the Pi)
+            if self.last_update and 0 < now - self.last_update < 3.0:
+                self.dt = 0.8 * self.dt + 0.2 * (now - self.last_update)
+            self.last_update = now
+            live      = max(0.7, self.dt * 2.5)
+            gap_eye   = max(SLEEP_GAP_SEC, self.dt * 2.0)
+            gap_yawn  = max(YAWN_GAP_SEC, self.dt * 2.0)
+            gap_tilt  = max(TILT_GAP_SEC, self.dt * 2.0)
+            gap_down  = max(HEAD_DOWN_GAP_SEC, self.dt * 2.0)
+
             if sig["has_driver"]:
                 self.last_seen = now
             present = (now - self.last_seen) < NO_DRIVER_SEC
 
-            # Eyes open = AWAKE only. No warning, and all counters are reset.
-            self.opened.update(sig["eyes_open"], now)
-            open_for = held(self.opened, now)
+            # Yawn timers
+            self.yawn.update(sig["yawning"], now, gap_yawn)
+            self.ystat.update(sig["yawning"], now, gap_yawn)
+            yawn_for  = held(self.yawn, now, live)
+            ystat_for = held(self.ystat, now, live)
+
+            # Head tilt timers (left / right tracked separately)
+            self.tiltL.update(sig["tilt_l"], now, gap_tilt)
+            self.tiltR.update(sig["tilt_r"], now, gap_tilt)
+            tiltL_for = held(self.tiltL, now, live)
+            tiltR_for = held(self.tiltR, now, live)
+
+            # Head drooping timer
+            self.down.update(sig["head_down"], now, gap_down)
+            down_for = held(self.down, now, live)
+
+            yawn_on  = self.yawn.live(now, live)
+            tiltL_on = self.tiltL.live(now, live)
+            tiltR_on = self.tiltR.live(now, live)
+            down_on  = self.down.live(now, live)
+
+            # Squinting while yawning is not sleeping (only for the first few seconds)
+            # NOTE: this only protects the DROWSY (4s) timer. The warning/sign for "Eyes closed" uses raw_closed.
+            yawn_squint = sig["yawning"] and yawn_for < YAWN_EYE_FORGIVE_SEC
+
+            self.opened.update(sig["eyes_open"], now, max(0.4, self.dt * 1.5))
+            open_for = held(self.opened, now, live)
             awake_now = open_for >= AWAKE_CLEAR_SEC
+
+            # Raw eyes-closed timer (not hidden by yawning) -> so "Yawning + Eyes closed" can show together
+            self.raw_closed.update(sig["eyes_closed"], now, gap_eye)
+            raw_closed_for = held(self.raw_closed, now, live)
+
             if awake_now and not self.drowsy:
-                self._clear_signs()
+                self.sleep.reset()
+                self.closed.reset()
+                self.raw_closed.reset()
+                raw_closed_for = 0.0
+                self.hist = deque((r[0], 0, 0, 0, r[4], r[5], r[6], r[7]) for r in self.hist)
 
             feed = dict(sig)
-            if awake_now:
-                feed.update(eyes_closed=False, head_down=False, head_tilt=False,
-                            yawning=False, sleeping=False)
+            if awake_now or (yawn_squint and not self.drowsy):
+                feed.update(eyes_closed=False, sleeping=False)
 
-            gap = AWAKE_CLEAR_SEC if sig["eyes_open"] else None
+            gap = AWAKE_CLEAR_SEC if sig["eyes_open"] else gap_eye
             self.sleep.update(feed["sleeping"], now, gap)
             self.closed.update(feed["eyes_closed"], now, gap)
-            self.down.update(feed["head_down"], now, gap)
-            self.tilt.update(feed["head_tilt"], now, gap)
-            self.yawn.update(feed["yawning"], now, gap)
-            self.ystat.update(sig["yawning"], now)
 
-            self.hist.append((now, feed["sleeping"], feed["eyes_closed"], feed["head_down"],
-                              feed["head_tilt"], feed["yawning"], sig["eyes_open"]))
+            # (time, sleeping, closed, down, tiltL, yawn, open, tiltR)
+            # "closed" uses the RAW eyes_closed so the warning confirm-ratio matches raw_closed timer
+            self.hist.append((now, feed["sleeping"], sig["eyes_closed"], sig["head_down"], sig["tilt_l"],
+                              sig["yawning"], sig["eyes_open"], sig["tilt_r"]))
             cutoff = now - (DROWSY_SECONDS + 3.0)
             while self.hist and self.hist[0][0] < cutoff:
                 self.hist.popleft()
 
-            sleep_for  = held(self.sleep, now)
-            closed_for = held(self.closed, now)
-            down_for   = held(self.down, now)
-            tilt_for   = held(self.tilt, now)
-            yawn_for   = held(self.yawn, now)
-            ystat_for  = held(self.ystat, now)
+            # PERCLOS: bilang ng nakapikit vs. nakitang mata sa mahabang window
+            if present:
+                self.perclos.append((now, bool(feed["eyes_closed"]), bool(sig["eyes_open"])))
+            while self.perclos and self.perclos[0][0] < now - PERCLOS_WINDOW_SEC:
+                self.perclos.popleft()
+            seen = [r for r in self.perclos if r[1] or r[2]]
+            perclos = (sum(1 for r in seen if r[1]) / len(seen)) if len(seen) >= PERCLOS_MIN_FRAMES else 0.0
+            span = (self.perclos[-1][0] - self.perclos[0][0]) if len(self.perclos) > 1 else 0.0
+            perclos_on = span >= PERCLOS_MIN_SEC and perclos >= PERCLOS_THRESHOLD
+
+            sleep_for  = held(self.sleep, now, live)
+            closed_for = held(self.closed, now, live)
 
             if ystat_for >= YAWN_COUNT_SEC and not self.yawn_counted:
                 self.yawn_counted = True
@@ -1966,37 +2156,72 @@ class DriverMonitor:
 
             recent_open = any(r[6] and now - r[0] <= 1.0 for r in self.hist)
 
+            # ── Strict warning signs (each must be held long enough) ──
+            warnings = []
+            if present:
+                if (not awake_now and raw_closed_for >= WARN_EYES_SEC
+                        and self._confirmed("closed", WARN_EYES_SEC, WARN_CONFIRM_RATIO, now)):
+                    warnings.append("Eyes closed")
+                if yawn_on and yawn_for >= WARN_YAWN_SEC:
+                    warnings.append("Yawning")
+                if down_on and down_for >= HEAD_DOWN_WARN_SEC:
+                    warnings.append("Head drooping")
+                if tiltL_on and tiltL_for >= TILT_WARN_SEC:
+                    warnings.append("Head tilt left")
+                if tiltR_on and tiltR_for >= TILT_WARN_SEC:
+                    warnings.append("Head tilt right")
+
+            # 2+ signs together for COMBO_DROWSY_SEC = drowsy
+            self.combo.update(len(warnings) >= 2, now, gap_eye)
+            combo_on = held(self.combo, now, live) >= COMBO_DROWSY_SEC
+
+            # ── Drowsy ALERT start / end ──
             if not self.drowsy:
-                if (present and feed["sleeping"] and sleep_for >= DROWSY_SECONDS and not recent_open
-                        and self._confirmed("sleeping", DROWSY_SECONDS, DROWSY_CONFIRM_RATIO, now)):
-                    parts = [n for n, v in (("Eyes closed", closed_for), ("Head down", down_for)) if v >= 0.5]
-                    self._start_episode(now, " + ".join(parts) or "Drowsy face")
+                eyes_drowsy = (present and feed["sleeping"] and sleep_for >= DROWSY_SECONDS and not recent_open
+                               and self._confirmed("sleeping", DROWSY_SECONDS, DROWSY_CONFIRM_RATIO, now))
+                if eyes_drowsy:
+                    self._start_episode(now, "Head drooping" if (sig["head_down"] and not sig["eyes_closed"]) else "Eyes closed")
+                elif present and combo_on:
+                    self._start_episode(now, " + ".join(warnings))
+                elif present and perclos_on:
+                    self._start_episode(now, f"Frequent eye closure ({int(perclos * 100)}% PERCLOS)")
             else:
                 if now - self.last_ping >= 1.0:
                     self.last_ping = now
                     send_to_esp32("DROWSY_ON")
-                if sig["sleeping"]:
+                if sig["sleeping"] or len(warnings) >= 2:
                     self.awake_since = None
                 elif self.awake_since is None:
                     self.awake_since = now
                 eyes_ok = open_for >= RECOVER_EYES_SEC
                 quiet = self.awake_since is not None and (now - self.awake_since) >= RECOVER_SEC
-                recovered = present and (eyes_ok or quiet)
+                recovered = present and (eyes_ok or quiet) and len(warnings) < 2
                 lost = (not present) and (now - self.last_seen) > FACELOST_MAX_SEC
                 if recovered or lost:
                     self._end_episode()
-                    sleep_for = closed_for = down_for = tilt_for = yawn_for = 0.0
+                    sleep_for = closed_for = raw_closed_for = yawn_for = down_for = 0.0
+                    tiltL_for = tiltR_for = 0.0
+                    yawn_on = tiltL_on = tiltR_on = down_on = False
+                    warnings = []
 
-            warnings = []
-            if not self.drowsy and present and not awake_now:
-                ok = lambda key, held_for, secs: held_for >= secs and self._confirmed(key, secs, WARN_CONFIRM_RATIO, now)
-                if ok("closed", closed_for, WARN_EYES_SEC): warnings.append("Eyes closed")
-                if ok("down",   down_for,   WARN_HEAD_SEC): warnings.append("Head down")
-                if ok("yawn",   yawn_for,   WARN_YAWN_SEC): warnings.append("Yawning")
-                if ok("tilt",   tilt_for,   WARN_HEAD_SEC): warnings.append("Head tilt")
-                if not warnings and ok("sleeping", sleep_for, WARN_SECONDS):
-                    warnings.append("Drowsy signs")
+            # ★ BAGO: RECORDING. Magre-record LANG kapag talagang nakapikit o humihikab.
+            # Kapag dilat ang mata (at hindi humihikab) -> walang record, titigil agad.
+            rec_reasons = []
+            if present:
+                if (not awake_now and not sig["eyes_open"]
+                        and raw_closed_for >= REC_EYES_SEC
+                        and self._confirmed("closed", REC_EYES_SEC, WARN_CONFIRM_RATIO, now)):
+                    rec_reasons.append("Eyes closed")
+                if yawn_on and yawn_for >= REC_YAWN_SEC:
+                    rec_reasons.append("Yawning")
+            if rec_reasons:
+                recorder.start(session["driver_name"], session["plate_number"], " + ".join(rec_reasons))
+            else:
+                recorder.stop()
 
+            # ── Warnings (only while not in a drowsy episode) ──
+            if self.drowsy:
+                warnings = []
             new = [w for w in warnings if w not in self.warn_active]
             if new:
                 stamp = datetime.now().strftime(TIME_FMT)
@@ -2012,33 +2237,38 @@ class DriverMonitor:
             self.warn_active = set(warnings)
             alert_out.set_mode("drowsy" if self.drowsy else ("warn" if warnings else "off"))
 
+            # ── Signs for display (looser, shows what is being seen right now) ──
             signs = []
-            if not awake_now:
-                if closed_for >= 0.5: signs.append("Eyes closed")
-                if down_for   >= 0.5: signs.append("Head down")
-                if yawn_for   >= 0.5: signs.append("Yawning")
-                if tilt_for   >= 0.5: signs.append("Head tilt")
-                if not signs and sleep_for >= 0.5: signs.append("Drowsy")
+            if not awake_now and raw_closed_for >= 0.5:
+                signs.append("Eyes closed")
+            if yawn_on:
+                signs.append("Yawning")
+            if down_on:
+                signs.append("Head drooping")
+            if tiltL_on:
+                signs.append("Head tilt left")
+            if tiltR_on:
+                signs.append("Head tilt right")
 
             if self.drowsy:
-                status, condition = "DROWSY", (" + ".join(signs) or "Drowsy")
+                status, condition = "DROWSY", (" + ".join(signs) or "Eyes closed")
             elif not present:
                 status, condition, signs = "NO_DRIVER", "No driver", []
             elif warnings:
                 status, condition = "WARNING", " + ".join(warnings)
-            elif sleep_for >= 0.8 and not awake_now:
-                status, condition = "WATCHING", (" + ".join(signs) or "Drowsy signs")
+            elif signs:
+                status, condition = "WATCHING", " + ".join(signs)
             else:
                 status, condition, signs = "AWAKE", "Awake", []
 
             self.snap = {"status": status, "condition": condition, "signs": signs,
-                         "drowsy_for": round(sleep_for, 1), "detected": names,
+                         "drowsy_for": round(max(sleep_for, down_for), 1), "detected": names,
+                         "tilt_deg": sig.get("roll"),
+                         "debug": sig.get("dbg"),
                          "updated": time.time()}
             session["current_status"] = status
 
 driver_monitor = DriverMonitor()
-
-EYE_CLASSES = {'eye_closed_L', 'eye_closed_R', 'eye_close_L', 'eye_open_L', 'eye_open_R'}
 
 def _infer(img):
     out = []
@@ -2053,8 +2283,74 @@ def _infer(img):
 def _has_eyes(dets):
     return any(n in EYE_CLASSES and c >= 0.30 for n, c, _ in dets)
 
+def _driver_box():
+    """Huling kilalang posisyon ng mukha ng driver, o None kung wala/luma na."""
+    if not DRIVER_LOCK_ENABLED:
+        return None
+    with driver_track_lock:
+        box, seen = driver_track["box"], driver_track["seen"]
+    if box is None or time.time() - seen > DRIVER_BOX_KEEP_SEC:
+        return None
+    return box
+
+def _filter_driver(dets, box):
+    """Itira lang ang detections na nasa paligid ng mukha ng driver."""
+    if box is None:
+        return [] if (DRIVER_LOCK_ENABLED and DRIVER_LOCK_STRICT and driver_track["enc"] is not None) else dets
+    x1, y1, x2, y2 = box
+    pw, ph = (x2 - x1) * DRIVER_BOX_PAD, (y2 - y1) * DRIVER_BOX_PAD
+    x1, x2, y1, y2 = x1 - pw, x2 + pw, y1 - ph, y2 + ph
+    keep = []
+    for d in dets:
+        bx = d[2]
+        cx, cy = (bx[0] + bx[2]) / 2, (bx[1] + bx[3]) / 2
+        if x1 <= cx <= x2 and y1 <= cy <= y2:
+            keep.append(d)
+    return keep
+
+def _unzoom(dets, x0, y0, f):
+    """Ibalik sa original frame coordinates ang detections mula sa zoomed crop."""
+    return [(n, c, (b[0] * f + x0, b[1] * f + y0, b[2] * f + x0, b[3] * f + y0)) for n, c, b in dets]
+
+def driver_tracker_loop():
+    """Hinahanap ang mukha ng naka-attendance na driver para malaman kung nasaan siya sa frame."""
+    import face_recognition
+    while True:
+        try:
+            if not DRIVER_LOCK_ENABLED or not monitoring_on():
+                time.sleep(0.5)
+                continue
+            with driver_track_lock:
+                enc = driver_track["enc"]
+            if enc is None:
+                time.sleep(0.5)
+                continue
+            frame = camera.read(max_age=0.5)
+            if frame is None:
+                time.sleep(0.1)
+                continue
+            s = DRIVER_TRACK_SCALE
+            small = cv2.resize(frame, (0, 0), fx=s, fy=s)
+            small_rgb = np.ascontiguousarray(cv2.cvtColor(small, cv2.COLOR_BGR2RGB), dtype=np.uint8)
+            locs = face_recognition.face_locations(small_rgb, model="hog")
+            if locs:
+                full_locs = [(int(t / s), int(r / s), int(b / s), int(l / s)) for t, r, b, l in locs]
+                full_rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), dtype=np.uint8)
+                encs = face_recognition.face_encodings(full_rgb, full_locs)
+                if encs:
+                    dists = face_recognition.face_distance(encs, enc)
+                    i = int(np.argmin(dists))
+                    if dists[i] < DRIVER_MATCH_THRESHOLD:
+                        t, r, b, l = full_locs[i]
+                        with driver_track_lock:
+                            driver_track["box"] = (l, t, r, b)
+                            driver_track["seen"] = time.time()
+        except Exception as e:
+            print(f"[tracker] error: {e}")
+        time.sleep(DRIVER_TRACK_SEC)
+
 def _zoom_crop(frame, dets):
-    """Crop around the detected face (or the center if none) and upscale, so the eyes/mouth appear larger."""
+    """Crop around the detected face (or the center if none) and upscale. Returns (crop, x0, y0, factor) or None."""
     h, w = frame.shape[:2]
     if dets:
         x1 = min(d[2][0] for d in dets); y1 = min(d[2][1] for d in dets)
@@ -2074,9 +2370,10 @@ def _zoom_crop(frame, dets):
     crop = frame[int(y0):int(y0 + ch), int(x0):int(x0 + cw)]
     if crop.size == 0:
         return None
-    return cv2.resize(crop, (w, h), interpolation=cv2.INTER_CUBIC)
+    return cv2.resize(crop, (w, h), interpolation=cv2.INTER_CUBIC), x0, y0, cw / w
 
 def detector_loop():
+    last_seq = -1
     while True:
         try:
             if is_system_locked():
@@ -2087,17 +2384,22 @@ def detector_loop():
                 driver_monitor.deactivate("INACTIVE")
                 time.sleep(0.3)
                 continue
-            frame = camera.read()
-            if frame is None:
-                time.sleep(0.1)
+            frame = camera.read(max_age=0.5)
+            if frame is None or camera.seq == last_seq:
+                time.sleep(0.02)
                 continue
-            dets = _infer(frame)
+            last_seq = camera.seq
+            dbox = _driver_box()
+            dets = _filter_driver(_infer(frame), dbox)
             if ZOOM_ENABLED and not _has_eyes(dets):
-                crop = _zoom_crop(frame, dets)
-                if crop is not None:
-                    dets = dets + _infer(crop)
+                zdets = dets if dets else ([("driver", 1.0, dbox)] if dbox else [])
+                z = _zoom_crop(frame, zdets)
+                if z is not None:
+                    crop, x0, y0, f = z
+                    extra = _unzoom(_infer(crop), x0, y0, f)
+                    dets = dets + _filter_driver(extra, dbox)
             named = [(n, c) for n, c, _ in dets]
-            driver_monitor.update(analyze(named), time.time(), [n for n, _ in named])
+            driver_monitor.update(analyze(dets), time.time(), [n for n, _ in named])
             time.sleep(0.02)
         except Exception as e:
             print(f"[detect] error: {e}")
@@ -2569,7 +2871,7 @@ def scan_face():
     if not db["encodings"]:
         print("[scan] No drivers registered. Use 'Sync New Drivers'.")
         return jsonify({"status": "no_match", "reason": "empty_db"})
-    matched_name = matched_plate = None
+    matched_name = matched_plate = matched_enc = matched_box = None
     best_distance, faces_seen, attempt = 9.9, 0, 0
     deadline = time.time() + SCAN_TIMEOUT_SEC
     while time.time() < deadline:
@@ -2601,6 +2903,9 @@ def scan_face():
             if distances[best_idx] < FACE_MATCH_THRESHOLD:
                 matched_name  = db["names"][best_idx]
                 matched_plate = db["plates"][best_idx]
+                matched_enc   = db["encodings"][best_idx]
+                t_, r_, b_, l_ = full_loc[0]
+                matched_box   = (l_, t_, r_, b_)
                 break
         except Exception as e:
             print(f"[scan] error on attempt {attempt}: {e}")
@@ -2628,6 +2933,8 @@ def scan_face():
         breath_session["result"] = None
         breath_session["peak"] = 0
         breath_session["max"] = 0
+        with driver_track_lock:
+            driver_track.update(enc=matched_enc, box=matched_box, seen=time.time())
         if SMS_NOTIFY_TIMEIN:
             gsm.send_sms(build_timein_sms(matched_name, matched_plate))
         return jsonify({"status": "matched", "name": matched_name, "plate": matched_plate})
@@ -2651,6 +2958,8 @@ def detect():
         "recording":     recorder.active,
         "signs":         [],
         "detected":      [],
+        "tilt_deg":      None,
+        "debug":         None,
     }
     if is_system_locked():
         return jsonify({**base, "status": "LOCKED", "condition": "Locked"})
@@ -2661,7 +2970,8 @@ def detect():
         return jsonify({**base, "status": "NO_DRIVER", "condition": "Starting detection..."})
     return jsonify({**base, "status": snap["status"], "condition": snap["condition"],
                     "signs": snap["signs"], "drowsy_for": snap["drowsy_for"],
-                    "detected": snap["detected"]})
+                    "detected": snap["detected"], "tilt_deg": snap.get("tilt_deg"),
+                    "debug": snap.get("debug")})
 
 @app.route("/api/end_session", methods=["POST"])
 def end_session():
@@ -2849,7 +3159,7 @@ def sms_command_loop():
         except Exception as e:
             print(f"[sms-in] error: {e}")
 
-# ── Test Routes (vibrator + speaker) ───────────────────   # <-- NEW
+# ── Test Routes (vibrator + speaker) ───────────────────
 @app.route("/api/test_alert")
 def test_alert():
     mode = request.args.get("mode", "warn")        # warn / drowsy / off
@@ -2874,8 +3184,9 @@ def test_sound():
 # ── Start Background Threads ───────────────────────────
 threading.Thread(target=read_esp32_bt, daemon=True).start()
 threading.Thread(target=detector_loop, daemon=True).start()
+threading.Thread(target=driver_tracker_loop, daemon=True).start()
 threading.Thread(target=gps_logger, daemon=True).start()
 threading.Thread(target=sms_command_loop, daemon=True).start()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False) 
