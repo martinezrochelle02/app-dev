@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session Report</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .report-wrap { max-width: 600px; margin: 0 auto; padding: 2rem; }
+    .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #1e1e1e; font-size: 13px; }
+    .row:last-child { border-bottom: none; }
+    .alert-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #1e1e1e; font-size: 13px; }
+    .alert-row:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div class="screen">
+    <div class="topbar">
+      <span style="font-size:14px; font-weight:500;">Session report</span>
+      <span class="clock" id="clock"></span>
+    </div>
+
+    <div class="report-wrap" id="report-content">
+      <p style="color:#555; text-align:center; margin-top:3rem;">Loading report...</p>
+    </div>
+
+    <div style="max-width:600px; margin:0 auto; padding:0 2rem 2rem; display:flex; gap:10px;">
+      <a href="/attendance" class="btn btn-ghost" style="flex:1; text-align:center; text-decoration:none;">View all attendance</a>
+      <a href="/" class="btn btn-primary" style="flex:1; text-align:center; text-decoration:none;">Back to home</a>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+
+    function ratingClass(r){
+      return r === 'Excellent' ? 'badge badge-success' :
+             r === 'Good'      ? 'badge badge-good'    :
+             r === 'Fair'      ? 'badge badge-fair'    : 'badge badge-poor';
+    }
+
+    async function loadReport(){
+      try {
+        const res  = await fetch('/api/end_session', { method: 'POST' });
+        const d    = await res.json();
+        const initials = d.name ? d.name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase() : '??';
+        const alertRows = d.alerts && d.alerts.length
+          ? d.alerts.map((t,i) => `
+              <div class="alert-row">
+                <span style="color:#555;">${t}</span>
+                <span>Drowsy detected</span>
+                <span class="badge ${i === d.alerts.length-1 ? 'badge-poor' : 'badge-fair'}">${i === d.alerts.length-1 ? 'Severe' : 'Mild'}</span>
+              </div>`)
+            .join('')
+          : '<p style="color:#555; font-size:13px;">No alerts recorded.</p>';
+
+        document.getElementById('report-content').innerHTML = `
+          <div class="card" style="margin-bottom:16px;">
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;">
+              <div class="avatar" style="width:48px;height:48px;font-size:14px;">${initials}</div>
+              <div>
+                <div style="font-size:16px; font-weight:500;">${d.name}</div>
+                <div style="font-size:12px; color:#555;">Plate: ${d.plate}</div>
+              </div>
+              <span class="badge badge-success" style="margin-left:auto;">Attendance logged</span>
+            </div>
+            <div class="row"><span style="color:#555;">Login time</span><span>${d.login}</span></div>
+            <div class="row"><span style="color:#555;">Logout time</span><span>${d.logout}</span></div>
+          </div>
+
+          <div class="stat-grid" style="margin-bottom:16px;">
+            <div class="stat-card">
+              <div class="stat-label">Drowsy alerts</div>
+              <div class="stat-value status-drowsy">${d.alert_count}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Safety rating</div>
+              <div class="stat-value">${d.rating}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Result</div>
+              <div class="stat-value" style="font-size:14px; padding-top:4px;">
+                <span class="${ratingClass(d.rating)}">${d.rating}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div style="font-size:13px; font-weight:500; color:#888; margin-bottom:10px;">Alert log</div>
+            ${alertRows}
+          </div>
+        `;
+      } catch(e) {
+        document.getElementById('report-content').innerHTML =
+          '<p style="color:#555; text-align:center; margin-top:3rem;">Could not load report. Session may have already ended.</p>';
+      }
+    }
+
+    loadReport();
+  </script>
+</body>
+</html>
